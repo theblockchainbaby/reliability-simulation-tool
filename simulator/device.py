@@ -59,7 +59,9 @@ class DeviceConfig:
     base_soft_error_rate: float = 1e-6  # Soft errors per bit per time step
     base_hard_failure_rate: float = 1e-8  # Hard failures per bit per time step
     degradation_rate: float = 0.001    # Rate at which error rate increases per step
-    ecc_capability: int = 1            # Number of correctable errors per word
+    degradation_exponent: float = 1.0  # 1.0=linear, 0.25=NBTI power-law
+    ecc_correctable: int = 1           # Max correctable errors per word
+    ecc_detectable: int = 1            # Max detectable errors per word
     word_size: int = 64                # Bits per ECC word
     stress: StressProfile = field(default_factory=StressProfile)
 
@@ -73,7 +75,10 @@ class Device:
     - Hard failures: permanent cell defects from oxide breakdown, electromigration
     - Degradation: progressive wear that increases the effective error rate
 
-    Uses vectorized operations and counter-based tracking for performance.
+    ECC evaluation uses three-way outcome:
+    - Corrected: errors <= ecc_correctable
+    - Detected Uncorrectable (DUE): errors > correctable but <= detectable
+    - Silent Data Corruption (SDC): errors > detectable (undetected corruption)
     """
 
     def __init__(self, config: DeviceConfig, rng: np.random.Generator | None = None):
@@ -86,14 +91,16 @@ class Device:
         self.total_hard_faults = 0
         self.degradation_factor = 1.0
 
-        # Counters instead of full event log
+        # Counters — three-way ECC outcome tracking
         self.total_soft_errors = 0
         self.total_hard_failures = 0
-        self.corrected_count = 0
-        self.uncorrectable_count = 0
+        self.corrected_count = 0          # ECC corrected successfully
+        self.due_count = 0                # Detected Uncorrectable Errors
+        self.sdc_count = 0                # Silent Data Corruption (worst case)
         self.time_step = 0
         self.failed = False
         self.failure_time: int | None = None
+        self.failure_mode: str | None = None  # "due" or "sdc"
 
         # Cache stress factor (doesn't change during simulation)
         self._stress_factor = config.stress.combined_factor
@@ -108,8 +115,9 @@ class Device:
 
         self.time_step += 1
 
-        # Apply degradation: error rate increases over time
-        self.degradation_factor = 1.0 + self.config.degradation_rate * self.time_step
+        # Apply degradation: error rate increases over time (power-law)
+        self.degradation_factor = 1.0 + self.config.degradation_rate * (
+            self.time_step ** self.config.degradation_exponent)
         stress_deg = self._stress_factor * self.degradation_factor
 
         # --- Soft error injection ---
@@ -135,6 +143,9 @@ class Device:
             self.total_hard_faults += num_hard
 
         # Assign soft errors to random words and check ECC
+        ecc_correct = self.config.ecc_correctable
+        ecc_detect = self.config.ecc_detectable
+
         if num_soft > 0:
             soft_words = self.rng.integers(0, self.num_words, size=num_soft)
             # Count soft errors per word this step
@@ -143,29 +154,50 @@ class Device:
                 w_int = int(w)
                 word_soft_counts[w_int] = word_soft_counts.get(w_int, 0) + 1
 
-            # ECC check: total errors in word = hard faults + soft errors this step
-            ecc_cap = self.config.ecc_capability
+            # Three-way ECC evaluation per word
             for word_idx, soft_count in word_soft_counts.items():
                 total_errors = int(self.hard_faults_per_word[word_idx]) + soft_count
-                if total_errors <= ecc_cap:
+
+                if total_errors <= ecc_correct:
+                    # ECC corrects all errors — no impact
                     self.corrected_count += soft_count
-                else:
-                    self.uncorrectable_count += soft_count
+                elif total_errors <= ecc_detect:
+                    # Detected but uncorrectable — system knows data is bad
+                    self.due_count += soft_count
                     if not self.failed:
                         self.failed = True
                         self.failure_time = self.time_step
-                        return  # Early exit on failure
+                        self.failure_mode = "due"
+                        return
+                else:
+                    # Silent data corruption — errors exceed detection
+                    self.sdc_count += soft_count
+                    if not self.failed:
+                        self.failed = True
+                        self.failure_time = self.time_step
+                        self.failure_mode = "sdc"
+                        return
 
         # Also check words that got new hard faults (even without soft errors)
         if num_hard > 0 and not self.failed:
             hard_words_set = set(int(w) for w in hard_words)
-            ecc_cap = self.config.ecc_capability
             for word_idx in hard_words_set:
-                if int(self.hard_faults_per_word[word_idx]) > ecc_cap:
-                    self.uncorrectable_count += 1
+                hard_count = int(self.hard_faults_per_word[word_idx])
+                if hard_count <= ecc_correct:
+                    pass  # Correctable
+                elif hard_count <= ecc_detect:
+                    self.due_count += 1
                     if not self.failed:
                         self.failed = True
                         self.failure_time = self.time_step
+                        self.failure_mode = "due"
+                        return
+                else:
+                    self.sdc_count += 1
+                    if not self.failed:
+                        self.failed = True
+                        self.failure_time = self.time_step
+                        self.failure_mode = "sdc"
                         return
 
     def get_summary(self) -> dict:
@@ -174,10 +206,12 @@ class Device:
             "time_steps": self.time_step,
             "failed": self.failed,
             "failure_time": self.failure_time,
+            "failure_mode": self.failure_mode,
             "total_soft_errors": self.total_soft_errors,
             "total_hard_failures": self.total_hard_failures,
             "corrected_errors": self.corrected_count,
-            "uncorrectable_errors": self.uncorrectable_count,
+            "due_count": self.due_count,
+            "sdc_count": self.sdc_count,
             "final_degradation_factor": self.degradation_factor,
             "hard_fault_count": self.total_hard_faults,
         }

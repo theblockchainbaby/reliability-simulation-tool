@@ -104,20 +104,44 @@ AF_voltage = (V_op / V_ref)^n
 ```
 Where n = 2 (power-law exponent for oxide stress).
 
-### Degradation
+### Degradation (Power-Law)
+
 ```
-degradation(t) = 1 + rate × t
+degradation(t) = 1 + rate × t^exponent
 ```
-Models progressive wear-out that increases error rates over device lifetime.
+
+Models progressive wear-out. Supports:
+
+- `exponent = 1.0` — Linear degradation (default, visible in demos)
+- `exponent = 0.25` — NBTI power-law (realistic for MOSFET threshold voltage shift)
+- `exponent = 0.5` — Hot carrier injection
+
+Use `--deg-exponent 0.25` for NBTI-style degradation.
 
 ## ECC Schemes Modeled
 
-| Scheme | Correctable | Detectable | Overhead | Use Case |
+| Scheme | Correctable | Detectable | SDC Threshold | Use Case |
 |---|---|---|---|---|
-| None | 0 | 0 | 0% | Baseline comparison |
-| SEC (Hamming) | 1 bit | 1 bit | 10.9% | Consumer DRAM |
-| SECDED | 1 bit | 2 bits | 12.5% | Standard ECC DIMMs |
-| Chipkill | 4 bits | 8 bits | 50% | Server/HPC memory |
+| None | 0 | 0 | 1-bit (any error is silent) | Baseline comparison |
+| SEC (Hamming) | 1 bit | 1 bit | 2-bit (miscorrection → SDC) | Consumer DRAM |
+| SECDED | 1 bit | 2 bits | 3-bit (exceeds detection) | Standard ECC DIMMs |
+| Chipkill | 4 bits | 8 bits | 9-bit | Server/HPC memory |
+
+**Key distinction**: SEC and SECDED both correct 1-bit errors, but differ in 2-bit behavior. SEC *miscorrects* 2-bit errors (silent data corruption), while SECDED *detects* them as uncorrectable (DUE). This difference is critical for data integrity.
+
+## Sample Output
+
+### ECC Scheme Survival Comparison
+
+![Survival Comparison](sample_charts/survival_comparison.png)
+
+### Error Analysis: Corrected / DUE / SDC
+
+![Error Breakdown](sample_charts/error_breakdown.png)
+
+### Weibull Probability Plot
+
+![Weibull Plot](sample_charts/weibull_plot.png)
 
 ## Generated Output
 

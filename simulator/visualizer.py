@@ -322,19 +322,22 @@ class ReliabilityVisualizer:
         ax1.grid(True, axis="y")
         ax1.set_title("Error Type Distribution")
 
-        # Right: Corrected vs Uncorrectable
+        # Right: Corrected vs DUE vs SDC
         corrected = [sum(d.corrected_errors for d in r.device_results) for r in results]
-        uncorrectable = [sum(d.uncorrectable_errors for d in r.device_results) for r in results]
+        due = [sum(d.due_errors for d in r.device_results) for r in results]
+        sdc = [sum(d.sdc_errors for d in r.device_results) for r in results]
 
-        ax2.bar(x - width/2, corrected, width, color=COLORS[2], label="Corrected (ECC)", alpha=0.8)
-        ax2.bar(x + width/2, uncorrectable, width, color=COLORS[4], label="Uncorrectable", alpha=0.8)
+        bar_w = 0.25
+        ax2.bar(x - bar_w, corrected, bar_w, color=COLORS[2], label="Corrected", alpha=0.8)
+        ax2.bar(x, due, bar_w, color=COLORS[5], label="DUE (Detected)", alpha=0.8)
+        ax2.bar(x + bar_w, sdc, bar_w, color=COLORS[4], label="SDC (Silent)", alpha=0.8)
         ax2.set_xlabel("Scenario")
         ax2.set_ylabel("Error Count (all devices)")
         ax2.set_xticks(x)
         ax2.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
         ax2.legend(fontsize=9)
         ax2.grid(True, axis="y")
-        ax2.set_title("ECC Effectiveness")
+        ax2.set_title("ECC Outcome: Corrected / DUE / SDC")
 
         plt.tight_layout()
         path = os.path.join(self.output_dir, f"{prefix}_error_breakdown.png")

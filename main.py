@@ -60,6 +60,16 @@ def print_progress(current, total, label=""):
         print()
 
 
+# ── ECC scheme parameters ────────────────────────────────────────────
+# Maps scheme name to (correctable, detectable) thresholds
+ECC_PARAMS = {
+    "none":     (0, 0),     # No ECC — any error is silent corruption
+    "sec":      (1, 1),     # SEC: corrects 1, detects 1 (2-bit = SDC)
+    "secded":   (1, 2),     # SECDED: corrects 1, detects 2 (3-bit = SDC)
+    "chipkill": (4, 8),     # Chipkill: corrects 4, detects 8
+}
+
+
 # ── Scenario builders ─────────────────────────────────────────────────
 def build_temperature_scenarios(num_devices: int, max_steps: int,
                                 base_config: DeviceConfig) -> list[SimulationConfig]:
@@ -73,7 +83,9 @@ def build_temperature_scenarios(num_devices: int, max_steps: int,
             base_soft_error_rate=base_config.base_soft_error_rate,
             base_hard_failure_rate=base_config.base_hard_failure_rate,
             degradation_rate=base_config.degradation_rate,
-            ecc_capability=base_config.ecc_capability,
+            degradation_exponent=base_config.degradation_exponent,
+            ecc_correctable=base_config.ecc_correctable,
+            ecc_detectable=base_config.ecc_detectable,
             word_size=base_config.word_size,
             stress=stress,
         )
@@ -82,7 +94,7 @@ def build_temperature_scenarios(num_devices: int, max_steps: int,
             max_time_steps=max_steps,
             device_config=device_cfg,
             seed=42,
-            label=f"{temp}°C",
+            label=f"{temp}\u00b0C",
         ))
     return configs
 
@@ -91,19 +103,21 @@ def build_ecc_scenarios(num_devices: int, max_steps: int,
                         base_config: DeviceConfig) -> list[SimulationConfig]:
     """Build scenarios comparing ECC schemes."""
     schemes = [
-        (ECCScheme.NONE, "No ECC", 0),
-        (ECCScheme.SEC, "SEC (Hamming)", 1),
-        (ECCScheme.SECDED, "SECDED", 1),
-        (ECCScheme.CHIPKILL, "Chipkill", 4),
+        ("No ECC",        *ECC_PARAMS["none"]),
+        ("SEC (Hamming)",  *ECC_PARAMS["sec"]),
+        ("SECDED",        *ECC_PARAMS["secded"]),
+        ("Chipkill",      *ECC_PARAMS["chipkill"]),
     ]
     configs = []
-    for scheme, label, capability in schemes:
+    for label, correctable, detectable in schemes:
         device_cfg = DeviceConfig(
             num_bits=base_config.num_bits,
             base_soft_error_rate=base_config.base_soft_error_rate,
             base_hard_failure_rate=base_config.base_hard_failure_rate,
             degradation_rate=base_config.degradation_rate,
-            ecc_capability=capability,
+            degradation_exponent=base_config.degradation_exponent,
+            ecc_correctable=correctable,
+            ecc_detectable=detectable,
             word_size=base_config.word_size,
             stress=base_config.stress,
         )
@@ -129,7 +143,9 @@ def build_voltage_scenarios(num_devices: int, max_steps: int,
             base_soft_error_rate=base_config.base_soft_error_rate,
             base_hard_failure_rate=base_config.base_hard_failure_rate,
             degradation_rate=base_config.degradation_rate,
-            ecc_capability=base_config.ecc_capability,
+            degradation_exponent=base_config.degradation_exponent,
+            ecc_correctable=base_config.ecc_correctable,
+            ecc_detectable=base_config.ecc_detectable,
             word_size=base_config.word_size,
             stress=stress,
         )
@@ -156,16 +172,20 @@ def run_and_analyze(configs: list[SimulationConfig],
 
     for config in configs:
         print(f"\n  {BOLD}{MAGENTA}[Simulating] {config.label}{RESET}")
-        print(f"  {DIM}{config.num_devices:,} devices × {config.max_time_steps:,} time steps{RESET}")
+        print(f"  {DIM}{config.num_devices:,} devices \u00d7 {config.max_time_steps:,} time steps{RESET}")
 
         result = engine.run(config)
         metrics = analyzer.analyze(result)
         all_results.append(result)
         all_metrics.append(metrics)
 
-        print(f"  {GREEN}Done{RESET} in {result.wall_time_sec:.1f}s — "
+        due = result.num_due_failures
+        sdc = result.num_sdc_failures
+        print(f"  {GREEN}Done{RESET} in {result.wall_time_sec:.1f}s \u2014 "
               f"{metrics.num_failed:,} failures ({metrics.failure_rate_total:.2%}), "
-              f"MTTF={metrics.mttf:,.0f}h")
+              f"MTTF={metrics.mttf:,.0f}h"
+              f"{f', {RED}SDC={sdc}{RESET}' if sdc > 0 else ''}"
+              f"{f', DUE={due}' if due > 0 else ''}")
 
     # Generate charts
     print(f"\n  {BOLD}Generating charts...{RESET}")
@@ -186,33 +206,47 @@ def run_and_analyze(configs: list[SimulationConfig],
 def print_comparison_table(results: list[SimulationResult],
                            metrics: list[ReliabilityMetrics]):
     """Print formatted comparison table."""
-    print(f"\n{BOLD}{CYAN}{'=' * 80}")
+    print(f"\n{BOLD}{CYAN}{'=' * 90}")
     print(f"  Reliability Comparison")
-    print(f"{'=' * 80}{RESET}\n")
+    print(f"{'=' * 90}{RESET}\n")
 
     # Header
+    sep = "\u2500"
+    wb_header = "Weibull \u03b2"
     print(f"  {'Scenario':<20s} {'Failures':>10s} {'Rate':>10s} {'MTTF (h)':>12s} "
-          f"{'B10 Life':>10s} {'Weibull β':>10s}")
-    print(f"  {'─' * 20} {'─' * 10} {'─' * 10} {'─' * 12} {'─' * 10} {'─' * 10}")
+          f"{'B10 Life':>10s} {'DUE':>7s} {'SDC':>7s} {wb_header:>10s}")
+    print(f"  {sep * 20} {sep * 10} {sep * 10} {sep * 12} "
+          f"{sep * 10} {sep * 7} {sep * 7} {sep * 10}")
 
     for res, met in zip(results, metrics):
-        label = (res.label or "—")[:20]
-        beta = f"{met.weibull_shape:.3f}" if met.weibull_shape > 0 else "—"
+        label = (res.label or "\u2014")[:20]
+        beta = f"{met.weibull_shape:.3f}" if met.weibull_shape > 0 else "\u2014"
+        due = res.num_due_failures
+        sdc = res.num_sdc_failures
+        sdc_str = f"{RED}{sdc:>7,d}{RESET}" if sdc > 0 else f"{sdc:>7,d}"
         print(f"  {label:<20s} {met.num_failed:>10,d} {met.failure_rate_total:>10.2%} "
-              f"{met.mttf:>12,.0f} {met.b10_life:>10,.0f} {beta:>10s}")
+              f"{met.mttf:>12,.0f} {met.b10_life:>10,.0f} {due:>7,d} {sdc_str} {beta:>10s}")
 
     # Best scenario
     best = min(zip(results, metrics), key=lambda x: x[1].failure_rate_total)
-    print(f"\n  {GREEN}Best: {best[0].label} — {best[1].failure_rate_total:.2%} failure rate, "
+    print(f"\n  {GREEN}Best: {best[0].label} \u2014 {best[1].failure_rate_total:.2%} failure rate, "
           f"MTTF {best[1].mttf:,.0f}h{RESET}")
 
     # Worst scenario
     worst = max(zip(results, metrics), key=lambda x: x[1].failure_rate_total)
     if worst[0].label != best[0].label:
-        print(f"  {RED}Worst: {worst[0].label} — {worst[1].failure_rate_total:.2%} failure rate, "
+        print(f"  {RED}Worst: {worst[0].label} \u2014 {worst[1].failure_rate_total:.2%} failure rate, "
               f"MTTF {worst[1].mttf:,.0f}h{RESET}")
 
-    print(f"\n{CYAN}{'=' * 80}{RESET}")
+    # Highlight SDC risk
+    sdc_scenarios = [(r, m) for r, m in zip(results, metrics) if r.num_sdc_failures > 0]
+    if sdc_scenarios:
+        print(f"\n  {RED}{BOLD}Silent Data Corruption Risk:{RESET}")
+        for r, m in sdc_scenarios:
+            print(f"    {RED}{r.label}: {r.num_sdc_failures} devices had undetected corruption "
+                  f"({r.sdc_rate:.2%}){RESET}")
+
+    print(f"\n{CYAN}{'=' * 90}{RESET}")
 
 
 # ── Export ────────────────────────────────────────────────────────────
@@ -229,7 +263,10 @@ def export_json(results: list[SimulationResult],
             "label": res.label,
             "num_devices": met.num_devices,
             "num_failed": met.num_failed,
+            "num_due_failures": res.num_due_failures,
+            "num_sdc_failures": res.num_sdc_failures,
             "failure_rate": met.failure_rate_total,
+            "sdc_rate": res.sdc_rate,
             "mttf": met.mttf,
             "mttf_ci_95": [met.mttf_ci_lower, met.mttf_ci_upper],
             "median_life": met.median_life,
@@ -241,17 +278,19 @@ def export_json(results: list[SimulationResult],
             "total_soft_errors": sum(d.soft_errors for d in res.device_results),
             "total_hard_failures": sum(d.hard_failures for d in res.device_results),
             "total_corrected": sum(d.corrected_errors for d in res.device_results),
-            "total_uncorrectable": sum(d.uncorrectable_errors for d in res.device_results),
+            "total_due": sum(d.due_errors for d in res.device_results),
+            "total_sdc": sum(d.sdc_errors for d in res.device_results),
             "wall_time_sec": res.wall_time_sec,
         }
-        # Device config
         cfg = res.config.device_config
         scenario["config"] = {
             "num_bits": cfg.num_bits,
             "base_soft_error_rate": cfg.base_soft_error_rate,
             "base_hard_failure_rate": cfg.base_hard_failure_rate,
             "degradation_rate": cfg.degradation_rate,
-            "ecc_capability": cfg.ecc_capability,
+            "degradation_exponent": cfg.degradation_exponent,
+            "ecc_correctable": cfg.ecc_correctable,
+            "ecc_detectable": cfg.ecc_detectable,
             "temperature_c": cfg.stress.temperature_c,
             "voltage_v": cfg.stress.voltage_v,
         }
@@ -266,7 +305,7 @@ def export_json(results: list[SimulationResult],
 # ── Main ──────────────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Reliability Simulation Tool — Monte Carlo hardware failure modeling",
+        description="Reliability Simulation Tool \u2014 Monte Carlo hardware failure modeling",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -286,6 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Base hard failure rate per bit per step (default: 1e-8)")
         p.add_argument("--degradation", type=float, default=0.001,
                        help="Degradation rate (default: 0.001)")
+        p.add_argument("--deg-exponent", type=float, default=1.0,
+                       help="Degradation power-law exponent: 1.0=linear, 0.25=NBTI (default: 1.0)")
         p.add_argument("--bits", type=int, default=1_048_576,
                        help="Bits per device (default: 1048576 = 1Mbit)")
 
@@ -293,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
     sim = sub.add_parser("simulate", help="Run single scenario simulation")
     add_common(sim)
     sim.add_argument("--temp", type=float, default=55,
-                     help="Temperature in °C (default: 55)")
+                     help="Temperature in \u00b0C (default: 55)")
     sim.add_argument("--voltage", type=float, default=1.2,
                      help="Voltage (default: 1.2V)")
     sim.add_argument("--ecc", choices=["none", "sec", "secded", "chipkill"],
@@ -320,15 +361,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def get_base_config(args) -> DeviceConfig:
     """Build base DeviceConfig from CLI args."""
-    ecc_map = {"none": 0, "sec": 1, "secded": 1, "chipkill": 4}
-    ecc_cap = ecc_map.get(getattr(args, "ecc", "secded"), 1)
+    ecc_name = getattr(args, "ecc", "secded")
+    correctable, detectable = ECC_PARAMS.get(ecc_name, (1, 2))
 
     return DeviceConfig(
         num_bits=args.bits,
         base_soft_error_rate=args.soft_rate,
         base_hard_failure_rate=args.hard_rate,
         degradation_rate=args.degradation,
-        ecc_capability=ecc_cap,
+        degradation_exponent=getattr(args, "deg_exponent", 1.0),
+        ecc_correctable=correctable,
+        ecc_detectable=detectable,
         stress=StressProfile(
             temperature_c=getattr(args, "temp", 55),
             voltage_v=getattr(args, "voltage", 1.2),
@@ -355,7 +398,7 @@ def main():
     all_metrics = []
 
     if args.command == "simulate":
-        label = f"{getattr(args, 'temp', 55)}°C / {getattr(args, 'voltage', 1.2)}V / {getattr(args, 'ecc', 'secded').upper()}"
+        label = f"{getattr(args, 'temp', 55)}\u00b0C / {getattr(args, 'voltage', 1.2)}V / {getattr(args, 'ecc', 'secded').upper()}"
         configs = [SimulationConfig(
             num_devices=args.num_devices,
             max_time_steps=args.time_steps,

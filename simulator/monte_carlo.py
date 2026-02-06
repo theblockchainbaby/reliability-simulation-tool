@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
@@ -23,11 +22,13 @@ class DeviceResult:
     device_id: int
     failed: bool
     failure_time: int | None
+    failure_mode: str | None       # "due" or "sdc" or None
     total_time_steps: int
     soft_errors: int
     hard_failures: int
     corrected_errors: int
-    uncorrectable_errors: int
+    due_errors: int                # Detected Uncorrectable
+    sdc_errors: int                # Silent Data Corruption
     final_degradation: float
 
 
@@ -62,10 +63,24 @@ class SimulationResult:
         return self.num_devices - self.num_failed
 
     @property
+    def num_due_failures(self) -> int:
+        return sum(1 for d in self.device_results if d.failure_mode == "due")
+
+    @property
+    def num_sdc_failures(self) -> int:
+        return sum(1 for d in self.device_results if d.failure_mode == "sdc")
+
+    @property
     def failure_rate(self) -> float:
         if self.num_devices == 0:
             return 0.0
         return self.num_failed / self.num_devices
+
+    @property
+    def sdc_rate(self) -> float:
+        if self.num_devices == 0:
+            return 0.0
+        return self.num_sdc_failures / self.num_devices
 
     @property
     def failure_times(self) -> list[int]:
@@ -100,7 +115,9 @@ def _simulate_single_device(args: tuple) -> DeviceResult:
         base_soft_error_rate=config_dict["base_soft_error_rate"],
         base_hard_failure_rate=config_dict["base_hard_failure_rate"],
         degradation_rate=config_dict["degradation_rate"],
-        ecc_capability=config_dict["ecc_capability"],
+        degradation_exponent=config_dict["degradation_exponent"],
+        ecc_correctable=config_dict["ecc_correctable"],
+        ecc_detectable=config_dict["ecc_detectable"],
         word_size=config_dict["word_size"],
         stress=stress,
     )
@@ -118,11 +135,13 @@ def _simulate_single_device(args: tuple) -> DeviceResult:
         device_id=device_id,
         failed=summary["failed"],
         failure_time=summary["failure_time"],
+        failure_mode=summary["failure_mode"],
         total_time_steps=summary["time_steps"],
         soft_errors=summary["total_soft_errors"],
         hard_failures=summary["total_hard_failures"],
         corrected_errors=summary["corrected_errors"],
-        uncorrectable_errors=summary["uncorrectable_errors"],
+        due_errors=summary["due_count"],
+        sdc_errors=summary["sdc_count"],
         final_degradation=summary["final_degradation_factor"],
     )
 
@@ -134,7 +153,9 @@ def _config_to_dict(config: DeviceConfig) -> dict:
         "base_soft_error_rate": config.base_soft_error_rate,
         "base_hard_failure_rate": config.base_hard_failure_rate,
         "degradation_rate": config.degradation_rate,
-        "ecc_capability": config.ecc_capability,
+        "degradation_exponent": config.degradation_exponent,
+        "ecc_correctable": config.ecc_correctable,
+        "ecc_detectable": config.ecc_detectable,
         "word_size": config.word_size,
         "temperature_c": config.stress.temperature_c,
         "voltage_v": config.stress.voltage_v,
